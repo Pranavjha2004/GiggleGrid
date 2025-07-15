@@ -3,43 +3,47 @@ import { Loader2, AlertCircle } from 'lucide-react';
 import MemeCard from './MemeCard';
 import { useSpring, animated } from '@react-spring/web';
 import { useGesture } from '@use-gesture/react';
+import { doc, setDoc } from 'firebase/firestore'; // Import Firestore functions
 
 // MemeReel Component: Handles fetching and displaying a reel of memes
-const MemeReel = ({ onInitialVideosLoaded }) => { // Accept onInitialVideosLoaded prop
+const MemeReel = ({ onInitialVideosLoaded, db, auth, userId, appId, onOpenComments }) => { // Accept onOpenComments prop
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [page, setPage] = useState(1); // Tracks the page for infinite scroll
+  const [page, setPage] = useState(1);
   const [currentVideoIndex, setCurrentVideoIndex] = useState(0);
   const observerTarget = useRef(null);
-  const reelContainerRef = useRef(null); // Ref for the scrollable container
-  const initialLoadCompleted = useRef(false); // Track if initial load is done
+  const reelContainerRef = useRef(null);
+  const initialLoadCompleted = useRef(false);
 
   // Pexels API Key
-  const PEXELS_API_KEY = import.meta.env.VITE_PEXELS_API_KEY; // Your actual Pexels API KEY
+  const PEXELS_API_KEY = import.meta.env.VITE_PEXELS_API_KEY;
 
   // react-spring for animating the vertical position
   const [{ y }, api] = useSpring(() => ({ y: 0 }));
 
-  // Debounce for wheel events
+  // Debounce for wheel events (still used for keyboard-like behavior on trackpads)
   const wheelTimeout = useRef(null);
   const WHEEL_DEBOUNCE_TIME = 400; // Time in ms to wait before allowing another wheel event
 
   // Function to fetch videos from Pexels API
   const fetchVideos = useCallback(async (pageNum, initialRandomPage = 0) => {
     if (!PEXELS_API_KEY) {
-      setError("Pexels API Key is not configured. Please get one from pexels.com/api and add it to MemeReel.jsx");
+      setError("Pexels API Key is not configured. Please get one from pexels.com/api and add it to your .env file as VITE_PEXELS_API_KEY.");
       setLoading(false);
       return;
+    }
+    if (!db || !userId || !appId) {
+        setError("Firebase is not initialized, user ID, or app ID is not available.");
+        setLoading(false);
+        return;
     }
 
     setLoading(true);
     setError(null);
     try {
-      // Use initialRandomPage for the first fetch, otherwise use pageNum for infinite scroll
       const actualPageToFetch = initialRandomPage > 0 ? initialRandomPage : pageNum;
 
-      // Increased per_page to load more videos and added cache-busting parameter
       const response = await fetch(`https://api.pexels.com/videos/search?query=funny+memes&per_page=15&page=${actualPageToFetch}&cachebust=${Date.now()}`, {
         headers: {
           Authorization: PEXELS_API_KEY,
@@ -53,31 +57,48 @@ const MemeReel = ({ onInitialVideosLoaded }) => { // Accept onInitialVideosLoade
       const data = await response.json();
 
       if (data.videos.length === 0 && actualPageToFetch > 1) {
-        // If no videos found on a random page, try fetching from page 1 as a fallback
         console.warn(`No videos found on page ${actualPageToFetch}. Falling back to page 1.`);
-        await fetchVideos(1, 0); // Recursively call with page 1, without randomizing
+        await fetchVideos(1, 0);
         return;
       }
 
-      const newVideos = data.videos.map(video => {
-        const videoFile = video.video_files.find(file => file.quality === 'hd' && file.width <= 1080) || video.video_files[0];
-        return {
-          id: video.id,
-          url: videoFile ? videoFile.link : '',
-          thumbnail: video.image,
-          title: video.url.split('/').pop().replace(/-/g, ' ').replace(/\.html$/, '') || 'Funny Meme',
-          description: `A hilarious video from Pexels by ${video.user.name}.`,
-          likes: Math.floor(Math.random() * 1000000),
-          comments: Math.floor(Math.random() * 10000),
-          shares: Math.floor(Math.random() * 10000),
-          photographer: video.user.name,
-          photographerUrl: video.user.url,
-        };
-      }).filter(video => video.url);
+      const newVideos = data.videos
+        .filter(video => video && video.id && video.video_files && video.video_files.length > 0)
+        .map(video => {
+          const videoFile = video.video_files.find(file => file.quality === 'hd' && video.width <= 1080) || video.video_files[0];
+          const videoUrl = videoFile ? videoFile.link : '';
 
-      // Only append if it's for infinite scroll, otherwise replace for initial load
+          const videoTitle = (typeof video.url === 'string' && video.url.split('/').pop()?.replace(/-/g, ' ').replace(/\.html$/, '')) || 'Funny Meme';
+
+          return {
+            id: String(video.id),
+            url: videoUrl,
+            thumbnail: video.image,
+            title: videoTitle,
+            description: `A hilarious video from Pexels by ${video.user.name}.`,
+            likes: 0,
+            comments: 0,
+            photographer: video.user.name,
+            photographerUrl: video.user.url,
+          };
+        })
+        .filter(video => video.url);
+
+      for (const video of newVideos) {
+        const videoDocRef = doc(db, `artifacts/${appId}/public/data/videos`, video.id);
+        await setDoc(videoDocRef, {
+          title: video.title,
+          url: video.url,
+          thumbnail: video.thumbnail,
+          photographer: video.photographer,
+          photographerUrl: video.photographerUrl,
+          likes: 0,
+          comments: 0
+        }, { merge: true });
+      }
+
       if (initialRandomPage === 0 && pageNum === 1) {
-          setVideos(newVideos); // For initial load (page 1, not random)
+          setVideos(newVideos);
       } else {
           setVideos(prevVideos => [...prevVideos, ...newVideos]);
       }
@@ -87,7 +108,6 @@ const MemeReel = ({ onInitialVideosLoaded }) => { // Accept onInitialVideosLoade
       setError(`Failed to load memes: ${e.message}. Please check your API key and network connection.`);
     } finally {
       setLoading(false);
-      // Signal to App.jsx that initial videos are loaded
       if (!initialLoadCompleted.current && pageNum === 1) {
         initialLoadCompleted.current = true;
         if (onInitialVideosLoaded) {
@@ -95,25 +115,22 @@ const MemeReel = ({ onInitialVideosLoaded }) => { // Accept onInitialVideosLoade
         }
       }
     }
-  }, [PEXELS_API_KEY, onInitialVideosLoaded]); // Add onInitialVideosLoaded to dependency array
+  }, [PEXELS_API_KEY, onInitialVideosLoaded, db, userId, appId]);
 
-  // Effect to fetch initial videos when the component mounts
   useEffect(() => {
-    // Generate a random page number between 1 and 10 for initial load
-    // Adjust maxPage as needed, but be mindful of potential empty results
-    const randomInitialPage = Math.floor(Math.random() * 10) + 1;
-    fetchVideos(1, randomInitialPage); // Pass 1 for internal page tracking, and randomInitialPage for actual fetch
-  }, [fetchVideos]);
+    if (db && userId && appId) {
+      const randomInitialPage = Math.floor(Math.random() * 10) + 1;
+      fetchVideos(1, randomInitialPage);
+    }
+  }, [fetchVideos, db, userId, appId]);
 
-  // Programmatic scrolling when currentVideoIndex changes
   useEffect(() => {
     if (reelContainerRef.current && videos.length > 0) {
       const videoHeight = reelContainerRef.current.clientHeight;
-      api.start({ y: -currentVideoIndex * videoHeight, immediate: false }); // Animate smoothly
+      api.start({ y: -currentVideoIndex * videoHeight, immediate: false });
     }
   }, [currentVideoIndex, videos.length, api]);
 
-  // Infinite scrolling logic using IntersectionObserver
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -135,82 +152,115 @@ const MemeReel = ({ onInitialVideosLoaded }) => { // Accept onInitialVideosLoade
     };
   }, [loading]);
 
-  // Fetch more videos when page number changes (for infinite scroll)
   useEffect(() => {
     if (page > 1) {
       fetchVideos(page);
     }
   }, [page, fetchVideos]);
 
-  // --- Gesture Handling with useGesture ---
+  // --- Keyboard Navigation ---
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (videos.length === 0) return;
+
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setCurrentVideoIndex(prevIndex => Math.min(prevIndex + 1, videos.length - 1));
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setCurrentVideoIndex(prevIndex => Math.max(prevIndex - 1, 0));
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [videos.length]);
+
+  // --- Click/Tap Navigation ---
+  const handleClick = useCallback((event) => {
+    // Check if the click originated from a button or link inside MemeCard
+    const target = event.target;
+    // Check if the click target or any of its ancestors is a button or an anchor tag
+    if (target.closest('button') || target.closest('a')) {
+      return; // Do not navigate if an interactive element was clicked
+    }
+
+    if (videos.length === 0 || !reelContainerRef.current) return;
+
+    const rect = reelContainerRef.current.getBoundingClientRect();
+    const clickY = event.clientY - rect.top;
+    const containerHeight = rect.height;
+
+    if (clickY < containerHeight / 2) {
+      setCurrentVideoIndex(prevIndex => Math.max(prevIndex - 1, 0));
+    } else {
+      setCurrentVideoIndex(prevIndex => Math.min(prevIndex + 1, videos.length - 1));
+    }
+  }, [videos.length]);
+
+  // --- Gesture Handling with useGesture (for visual drag/rubberband AND navigation) ---
   useGesture(
     {
-      onDrag: ({ last, movement: [, my] }) => {
+      onDrag: ({ active, movement: [, my], cancel }) => {
         const videoHeight = reelContainerRef.current.clientHeight;
-        const currentY = -currentVideoIndex * videoHeight; // Current resting Y position
+        const currentSnapY = -currentVideoIndex * videoHeight;
 
-        // Calculate target Y during drag
-        const newY = currentY + my;
+        const lowerBound = -(videos.length - 1) * videoHeight;
+        const upperBound = 0;
 
-        if (last) {
-          // On drag end, decide whether to go to next/prev video or snap back
-          const threshold = videoHeight / 4; // Swipe threshold (e.g., 25% of video height)
-          let newIndex = currentVideoIndex;
+        let newY = currentSnapY + my;
+        if (newY < lowerBound) {
+          newY = lowerBound - (lowerBound - newY) * 0.2; // Apply rubberband below
+        } else if (newY > upperBound) {
+          newY = upperBound + (newY - upperBound) * 0.2; // Apply rubberband above
+        }
 
-          if (my < -threshold && currentVideoIndex < videos.length - 1) { // Swiped up enough
-            newIndex = currentVideoIndex + 1;
-          } else if (my > threshold && currentVideoIndex > 0) { // Swiped down enough
-            newIndex = currentVideoIndex - 1;
+        api.start({ y: newY, immediate: true }); // Immediate visual update during drag
+      },
+      onDragEnd: ({ movement: [, my], velocity: [, vy], direction: [, dyDirection] }) => {
+        const videoHeight = reelContainerRef.current.clientHeight;
+        let newIndex = currentVideoIndex;
+        const swipeThreshold = videoHeight * 0.25; // 25% of video height for a swipe
+        const flickVelocityThreshold = 0.5; // Velocity to consider a "flick"
+
+        if (Math.abs(my) > swipeThreshold || Math.abs(vy) > flickVelocityThreshold) {
+          // Determine direction based on movement or velocity
+          if (my < 0 || (Math.abs(vy) > flickVelocityThreshold && dyDirection > 0)) {
+            newIndex = currentVideoIndex + 1; // Swiped up (next video)
+          } else if (my > 0 || (Math.abs(vy) > flickVelocityThreshold && dyDirection < 0)) {
+            newIndex = currentVideoIndex - 1; // Swiped down (previous video)
           }
-          setCurrentVideoIndex(newIndex);
-        } else {
-          // During drag, update spring immediately to follow finger
-          api.start({ y: newY, immediate: true });
         }
+        
+        // Ensure newIndex is within bounds
+        newIndex = Math.max(0, Math.min(newIndex, videos.length - 1));
+        setCurrentVideoIndex(newIndex);
+
+        // Snap the spring to the new, corrected position
+        api.start({ y: -newIndex * videoHeight, immediate: false });
       },
-      onWheel: ({ event, last, delta: [, dy] }) => {
-        event.preventDefault(); // Prevent native scroll
-
-        if (wheelTimeout.current) {
-          return; // Ignore if already debouncing
-        }
-
-        const direction = dy > 0 ? 1 : -1; // 1 for down, -1 for up
-
-        setCurrentVideoIndex(prevIndex => {
-          const newIndex = prevIndex + direction;
-          return Math.max(0, Math.min(newIndex, videos.length - 1));
-        });
-
-        // Set timeout to debounce wheel events
-        wheelTimeout.current = setTimeout(() => {
-          wheelTimeout.current = null;
-        }, WHEEL_DEBOUNCE_TIME);
-      },
+      // onWheel handler is removed as per user request for tap/swipe/keyboard navigation only
     },
     {
-      target: reelContainerRef, // Attach gestures to the reel container
-      eventOptions: { passive: false }, // Allow preventDefault for wheel/touchmove
+      target: reelContainerRef,
+      eventOptions: { passive: false }, // Allows preventDefault for touchmove/wheel
       drag: {
-        filterTaps: true, // Prevent drag from triggering click events
-        axis: 'y', // Only vertical drag
-        rubberband: true, // Allow rubberband effect at ends
-        // Bounds are implicitly handled by setCurrentVideoIndex and spring animation
+        filterTaps: true, // Crucial: prevents drag from triggering onClick
+        axis: 'y',
       },
-      wheel: {
-        // Wheel sensitivity is implicitly handled by the debounced setCurrentVideoIndex
-      }
     }
   );
 
   return (
-    // Container for the meme reel, now with controlled overflow and gesture handlers
     <div
-      ref={reelContainerRef} // Attach ref to the container
+      ref={reelContainerRef}
       className="relative w-full max-w-md h-[calc(100vh-150px)] md:h-[calc(100vh-200px)] overflow-y-hidden rounded-lg shadow-2xl bg-gray-900 hide-scrollbar"
+      onClick={handleClick}
     >
       {videos.length === 0 && loading && (
-        <div className="absolute inset-0 flex items-center justify-center text-white text-lg">
+        <div className="absolute inset-0 flex items-center justify-center text-gray-50 text-lg">
           <Loader2 className="animate-spin mr-2" size={24} /> Loading GiggleGrid...
         </div>
       )}
@@ -221,25 +271,30 @@ const MemeReel = ({ onInitialVideosLoaded }) => { // Accept onInitialVideosLoade
         </div>
       )}
 
-      {/* Animated container for the videos */}
       <animated.div
-        style={{ y }} // Apply the animated y position
-        className="w-full h-full will-change-transform" // will-change-transform for performance
+        style={{ y }}
+        className="w-full h-full will-change-transform"
       >
         {videos.map((video, index) => (
-          <MemeCard
-            key={video.id}
-            video={video}
-            isActive={index === currentVideoIndex}
-            // Preload 2 videos before and 2 videos after the current active video
-            isPreloaded={index >= currentVideoIndex - 2 && index <= currentVideoIndex + 2}
-            ref={index === videos.length - 1 ? observerTarget : null}
-          />
+          video ? (
+            <MemeCard
+              key={video.id}
+              video={video}
+              isActive={index === currentVideoIndex}
+              isPreloaded={index >= currentVideoIndex - 2 && index <= currentVideoIndex + 2}
+              db={db}
+              auth={auth}
+              userId={userId}
+              appId={appId}
+              onOpenComments={onOpenComments} // Pass the handler down
+              ref={index === videos.length - 1 ? observerTarget : null}
+            />
+          ) : null
         ))}
       </animated.div>
 
       {loading && videos.length > 0 && (
-        <div className="flex items-center justify-center p-4 text-white">
+        <div className="flex items-center justify-center p-4 text-gray-50">
           <Loader2 className="animate-spin mr-2" size={20} /> Loading more...
         </div>
       )}
