@@ -97,8 +97,8 @@ const App = () => {
     <div className="min-h-screen w-screen bg-gray-950 text-gray-50 font-inter overflow-hidden flex flex-col items-start p-6 md:p-8">
       {showSplashScreen && <SplashScreen onLoaded={splashScreenLoadedRef} />}
 
-      <h1 className="text-4xl font-extrabold mb-6 text-transparent bg-clip-text bg-gradient-to-r from-purple-500 to-pink-700 drop-shadow-xl self-start">
-        GiggleGrid
+      <h1 className="text-4xl font-extrabold mb-6 text-zinc-200">
+        Giggle<span className='text-red-400'>Grid</span>
       </h1>
       <div className="flex-grow w-full flex items-center justify-center">
         {firebaseInitialized ? (
